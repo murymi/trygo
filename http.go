@@ -297,7 +297,6 @@ func (self *Unchunker) Read(my_buff []byte) (int, error) {
 		return 0, ChunkErrorFrom("failed to parse chunk length")
 	}
 	if expectedlen == 0 {
-		fmt.Println("end of file")
 		return 0, io.EOF
 	}
 	self.expecting = int(expectedlen)
@@ -508,45 +507,6 @@ func (self *ResponseBuilder) String() string {
 	return builder.String()
 }
 
-// func maint() {
-// 	var listener, err = net.Listen("tcp", ":3000")
-// 	if err != nil {
-// 		panic("failed to create tcp listener")
-// 	}
-// 
-// 	var server = HttpServer{listener}
-// 
-// 	for {
-// 		request, err := server.Accept()
-// 		if err != nil {
-// 			panic("failed to accept a new connection")
-// 		}
-// 
-// 		fmt.Println("a new connection has been accepted")
-// 		var buff [1024]byte
-// 
-// 		for {
-// 			if request.stream.finished == true {
-// 				break
-// 			}
-// 			_, e := request.stream.Read(buff[:])
-// 
-// 			if e != nil {
-// 				if e != io.EOF {
-// 					panic(e)
-// 				}
-// 			}
-// 		}
-// 
-// 		fmt.Println("====**====")
-// 
-// 		var response ResponseBuilder
-// 		request.stream.Write([]byte(response.toString()))
-// 		request.stream.Close()
-// 
-// 	}
-// }
-
 type HTTPClient struct {
 	conn    Conn
 	headers map[string]string
@@ -606,21 +566,3 @@ func (self *HTTPClient) Connect(u string) (*Request, error) {
 	}
 	return res, err
 }
-
-// func main() {
-// 
-// 	var client HTTPClient
-// 	resp, err := client.Connect("https://internet.org")
-// 	if err != nil {
-// 		fmt.Println(err);
-// 		panic("failed to connect")
-// 	}
-// 
-// 	//fmt.Println();
-// 
-// 	var buff [1024]byte
-// 
-// 	resp.stream.Read(buff[:])
-// 	//
-// 	fmt.Println(string(buff[:]))
-// }
