@@ -311,7 +311,7 @@ func (self *Unchunker) Read(my_buff []byte) (int, error) {
 	return len, nil
 }
 
-func InitRequest() Request {
+func initRequest() Request {
 	var message Request
 	message.headers = make(map[string][]string)
 	return message
@@ -351,7 +351,7 @@ func readHead(conection Conn) (*Request, error) {
 	var mock = RealBuffer{conection}
 	//initMockBuffer(me)
 	var buff [4096]uint8
-	var message = InitRequest()
+	var message = initRequest()
 	message.headers = make(map[string][]string)
 	regex := regexp.MustCompile(`HTTP\/[0-9]\.[0-9]`)
 	regex_comma := regexp.MustCompile("[ ]*,[ ]*")
@@ -476,12 +476,12 @@ type ResponseBuilder struct {
 	headers     map[string]string
 }
 
-func (self *ResponseBuilder) setCode(code uint16) *ResponseBuilder {
+func (self *ResponseBuilder) SetCode(code uint16) *ResponseBuilder {
 	self.status_code = fmt.Sprintf("%d", code)
 	return self
 }
 
-func (self *ResponseBuilder) setHeader(field string, value string) *ResponseBuilder {
+func (self *ResponseBuilder) SetHeader(field string, value string) *ResponseBuilder {
 	if self.headers == nil {
 		self.headers = make(map[string]string)
 	}
