@@ -36,15 +36,17 @@
 // chunk-ext-val  = token / quoted-string
 // trailer-section   = *( field-line CRLF )
 
-package main
+package trygo
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -86,11 +88,17 @@ func initMockBuffer(str string) mock {
 	}
 }
 
-type RealBuffer struct {
-	stream net.Conn
+type Conn interface {
+	Read(b []byte) (int, error);
+	Write(b []byte) (int, error);
+	Close() error
 }
 
-func (self *RealBuffer) Write(buff[]byte) (int, error) {
+type RealBuffer struct {
+	stream Conn
+}
+
+func (self *RealBuffer) Write(buff []byte) (int, error) {
 	return self.stream.Write(buff)
 }
 
@@ -102,7 +110,7 @@ func (self *RealBuffer) Read(buff []byte) (int, error) {
 	return n, nil
 }
 
-func (self *RealBuffer) readLine(buff []byte) (int, error){
+func (self *RealBuffer) readLine(buff []byte) (int, error) {
 	var index = 0
 	for {
 		var b [1]byte
@@ -179,15 +187,17 @@ const (
 	RESPONSE MessageType = 1
 )
 
-type Message struct {
-	message_type MessageType
-	http_version string
-	http_method  HTTPMethod
-	method       HTTPMethod
-	headers      map[string][]string
-	stream       HttpStream
-	encoding     Encoding
-	length       int
+type Request struct {
+	//message_type MessageType
+	//http_version string
+	uri         string
+	http_method HTTPMethod
+	method      HTTPMethod
+	headers     map[string][]string
+	stream      HttpStream
+	encoding    Encoding
+	length      int
+	status_code string
 }
 
 type Unchunker struct {
@@ -202,9 +212,9 @@ type Stream struct {
 }
 
 type HttpStream struct {
-	reader io.ReadWriter
-	finished bool
-	to_read int
+	reader       io.ReadWriter
+	finished     bool
+	to_read      int
 	already_read int
 }
 
@@ -219,22 +229,21 @@ func (self *HttpStream) Close() error {
 	}
 }
 
-
 func (self *HttpStream) Read(buff []byte) (int, error) {
 	switch v := self.reader.(type) {
 	case *RealBuffer:
-		r, err :=  v.Read(buff)
-		self.already_read += r;
+		r, err := v.Read(buff)
+		self.already_read += r
 		if self.already_read >= self.to_read {
 			self.finished = true
 		}
-		return r, err;
+		return r, err
 	case *Unchunker:
-		r, err :=  v.Read(buff)
+		r, err := v.Read(buff)
 		if err == io.EOF {
 			self.finished = true
 		}
-		return r, err;
+		return r, err
 	default:
 		return 0, errors.New("invalid stream")
 	}
@@ -286,7 +295,7 @@ func (self *Unchunker) ReadChunk(my_buff []byte) (int, bool, error) {
 	r, e := self.m.Read(my_buff[:min(self.expecting, len(my_buff))])
 
 	if e != nil {
-		return r, false, e;
+		return r, false, e
 	}
 	self.expecting -= r
 	if self.expecting <= 0 {
@@ -310,7 +319,7 @@ func (self *Unchunker) Write(buff []byte) (int, error) {
 
 func (self *Unchunker) Read(my_buff []byte) (int, error) {
 	var buff [64]byte
-	var index = 0;
+	var index = 0
 	if self.expecting > 0 {
 		r, _, err := self.ReadChunk(my_buff)
 		if err != nil {
@@ -350,8 +359,8 @@ func (self *Unchunker) Read(my_buff []byte) (int, error) {
 	return len, nil
 }
 
-func InitMessage() Message {
-	var message Message
+func InitRequest() Request {
+	var message Request
 	message.headers = make(map[string][]string)
 	return message
 }
@@ -375,7 +384,6 @@ func ChunkErrorFrom(str string) error {
 	return &InvalidHeader{str}
 }
 
-
 func HeaderErrorFrom(str string) error {
 	return &InvalidHeader{str}
 }
@@ -384,21 +392,20 @@ func (self InvalidHeader) Error() string {
 	return self.message
 }
 
-func readHead(conection net.Conn) (*Message, error) {
+func readHead(conection Conn) (*Request, error) {
 	//var me = "GET /hello.txt HTTP/1.1\r\ncontent-length: 3\r\n\r\n300"
 	//var message = "a\nb\nc\n"
 	//var me = "HTTP/1.1 200 OK\r\n"
 	var mock = RealBuffer{conection}
 	//initMockBuffer(me)
-	var buff [1024]uint8
-	var message = InitMessage()
+	var buff [4096]uint8
+	var message = InitRequest()
 	message.headers = make(map[string][]string)
 	regex := regexp.MustCompile(`HTTP\/[0-9]\.[0-9]`)
 	regex_comma := regexp.MustCompile("[ ]*,[ ]*")
 
 	for i := 0; ; i++ {
 		read_bytes, err := mock.readLine(buff[:])
-
 		if err != nil {
 			return nil, nil
 		}
@@ -416,7 +423,7 @@ func readHead(conection net.Conn) (*Message, error) {
 		}
 		if i == 0 {
 			if startsWith(buff[:], "HTTP") {
-				message.message_type = RESPONSE
+				//message.message_type = RESPONSE
 				var found_buff, rem, found = bytes.Cut(read_line[:read_bytes], []byte(" "))
 				if !found {
 					return nil, HeaderErrorFrom(mf)
@@ -428,12 +435,13 @@ func readHead(conection net.Conn) (*Message, error) {
 				if !found {
 					return nil, HeaderErrorFrom(mf)
 				}
+				message.status_code = string(found_buff);
 				found_buff, rem, found = bytes.Cut(rem[:], []byte("\r"))
 				if len(found_buff) == 0 {
 					return nil, HeaderErrorFrom(mf)
 				}
 			} else {
-				message.message_type = REQUEST
+				//message.message_type = REQUEST
 				var found_buff, rem, found = bytes.Cut(read_line[:read_bytes], []byte(" "))
 				if !found {
 					return nil, HeaderErrorFrom(mf)
@@ -494,25 +502,25 @@ func readHead(conection net.Conn) (*Message, error) {
 }
 
 type HttpServer struct {
-	listener net.Listener;
+	listener net.Listener
 }
 
-func (self *HttpServer) Accept() (*Message, error) {
-	con, err := self.listener.Accept();
+func (self *HttpServer) Accept() (*Request, error) {
+	con, err := self.listener.Accept()
 	if err != nil {
 		return nil, nil
 	}
 	message, err := readHead(con)
-	return message, nil;
+	return message, nil
 }
 
 type ResponseBuilder struct {
 	status_code string
-	headers map[string]string
+	headers     map[string]string
 }
 
 func (self *ResponseBuilder) setCode(code uint16) *ResponseBuilder {
-	self.status_code = fmt.Sprintf("%d", code);
+	self.status_code = fmt.Sprintf("%d", code)
 	return self
 }
 
@@ -520,8 +528,8 @@ func (self *ResponseBuilder) setHeader(field string, value string) *ResponseBuil
 	if self.headers == nil {
 		self.headers = make(map[string]string)
 	}
-	val, ok :=  self.headers[field]
-	if ok  {
+	val, ok := self.headers[field]
+	if ok {
 		self.headers[field] = fmt.Sprintf("%s, %s", val, value)
 	} else {
 		self.headers[field] = value
@@ -533,51 +541,130 @@ func (self *ResponseBuilder) toString() string {
 	if self.status_code == "" {
 		self.status_code = "200"
 	}
-	var s = fmt.Sprintf("HTTP/1.1 %s  \r\n", self.status_code);
+	var s = fmt.Sprintf("HTTP/1.1 %s  \r\n", self.status_code)
 	var builder strings.Builder
 	builder.WriteString(s)
 	for key, val := range self.headers {
-		builder.WriteString(fmt.Sprintf("%s: %s\r\n", key,val))
+		builder.WriteString(fmt.Sprintf("%s: %s\r\n", key, val))
 	}
-	builder.WriteString("\r\n");
-	return builder.String();
+	builder.WriteString("\r\n")
+	return builder.String()
 }
 
-func main() {
-	var listener, err = net.Listen("tcp", ":3000")
+// func maint() {
+// 	var listener, err = net.Listen("tcp", ":3000")
+// 	if err != nil {
+// 		panic("failed to create tcp listener")
+// 	}
+// 
+// 	var server = HttpServer{listener}
+// 
+// 	for {
+// 		request, err := server.Accept()
+// 		if err != nil {
+// 			panic("failed to accept a new connection")
+// 		}
+// 
+// 		fmt.Println("a new connection has been accepted")
+// 		var buff [1024]byte
+// 
+// 		for {
+// 			if request.stream.finished == true {
+// 				break
+// 			}
+// 			_, e := request.stream.Read(buff[:])
+// 
+// 			if e != nil {
+// 				if e != io.EOF {
+// 					panic(e)
+// 				}
+// 			}
+// 		}
+// 
+// 		fmt.Println("====**====")
+// 
+// 		var response ResponseBuilder
+// 		request.stream.Write([]byte(response.toString()))
+// 		request.stream.Close()
+// 
+// 	}
+// }
+
+type HTTPClient struct {
+	url     string
+	conn    Conn
+	headers map[string]string
+}
+
+func iSRedirectionCode(code string) bool {
+	return code == "301" || code == "302" || code == "303" || code == "307" || code == "308"
+}
+
+func (self *HTTPClient) Connect(u string) (*Request, error) {
+	if self.headers == nil {
+		self.headers = make(map[string]string)
+	}
+	uri, err := url.Parse(u)
 	if err != nil {
-		panic("failed to create tcp listener")
+		return nil, err
 	}
-
-	var server = HttpServer{listener}
-
-	for {
-		request, err := server.Accept()
-		if err != nil {
-			panic("failed to accept a new connection")
-		}
-
-		fmt.Println("a new connection has been accepted")
-		var buff [1024]byte
-
-		for {
-			if request.stream.finished == true {
-				break
-			}
-			_, e := request.stream.Read(buff[:])
-
-			if e != nil {
-				if e != io.EOF {
-					panic(e)
-				}
-			}
-		}
-
-		fmt.Println("====**====")
-
-		var response ResponseBuilder
-		request.stream.Write([]byte(response.toString()));
-		request.stream.Close();
-
+	if uri.Host == "" {
+		return nil, errors.New("no host")
 	}
+	self.headers["Host"] = uri.Host
+	self.headers["User-Agent"] = "trygo v 1.1"
+	self.headers["Connection"] = "Close"
+
+	url := uri.RequestURI();
+	if uri.Fragment != "" {
+		url = fmt.Sprintf("%s#%s", url, uri.Fragment)
+	}
+	c, err := net.Dial("tcp", fmt.Sprintf("%s:443", uri.Host))
+	if err != nil {
+		return nil, err
+	}
+	if uri.Scheme == "https" {
+		self.conn = tls.Client(c, &tls.Config{InsecureSkipVerify: true})
+	} else {
+		self.conn = c
+	}
+	var request strings.Builder
+	request.WriteString(fmt.Sprintf("GET %s HTTP/1.1\r\n", url))
+	for key, value := range self.headers {
+		request.WriteString(fmt.Sprintf("%s: %s\r\n", key, value))
+	}
+	request.WriteString("\r\n");
+	_, err = self.conn.Write([]byte(request.String()));
+	if err != nil {
+		return nil, err
+	}
+	res, err := readHead(self.conn);
+	if err != nil {
+		return nil, err
+	}
+	if iSRedirectionCode(res.status_code) {
+		rd, ok := res.headers["location"]
+		if ok {
+			res, err = self.Connect(rd[0])
+		}
+	}
+	return res, err
 }
+
+// func main() {
+// 
+// 	var client HTTPClient
+// 	resp, err := client.Connect("https://internet.org")
+// 	if err != nil {
+// 		fmt.Println(err);
+// 		panic("failed to connect")
+// 	}
+// 
+// 	//fmt.Println();
+// 
+// 	var buff [1024]byte
+// 
+// 	resp.stream.Read(buff[:])
+// 	//
+// 	fmt.Println(string(buff[:]))
+// }
