@@ -115,6 +115,10 @@ func (self *RealBuffer) readLine(buff []byte) (int, error){
 		}
 		buff[index] = b[0]
 		index += n
+
+		if index >= int(len(buff)) {
+			break
+		}
 	}
 
 	return index, nil
@@ -200,6 +204,8 @@ type Stream struct {
 type HttpStream struct {
 	reader io.ReadWriter
 	finished bool
+	to_read int
+	already_read int
 }
 
 func (self *HttpStream) Close() error {
@@ -217,9 +223,18 @@ func (self *HttpStream) Close() error {
 func (self *HttpStream) Read(buff []byte) (int, error) {
 	switch v := self.reader.(type) {
 	case *RealBuffer:
-		return v.Read(buff)
+		r, err :=  v.Read(buff)
+		self.already_read += r;
+		if self.already_read >= self.to_read {
+			self.finished = true
+		}
+		return r, err;
 	case *Unchunker:
-		return v.Read(buff)
+		r, err :=  v.Read(buff)
+		if err == io.EOF {
+			self.finished = true
+		}
+		return r, err;
 	default:
 		return 0, errors.New("invalid stream")
 	}
@@ -275,7 +290,7 @@ func (self *Unchunker) ReadChunk(my_buff []byte) (int, bool, error) {
 	}
 	self.expecting -= r
 	if self.expecting <= 0 {
-		r, e = self.m.Read(buff[:2])
+		_, e = self.m.Read(buff[:2])
 		if e != nil {
 			return r, false, e
 		}
@@ -295,19 +310,15 @@ func (self *Unchunker) Write(buff []byte) (int, error) {
 
 func (self *Unchunker) Read(my_buff []byte) (int, error) {
 	var buff [64]byte
-
+	var index = 0;
 	if self.expecting > 0 {
-		len, complete, err := self.ReadChunk(my_buff)
+		r, _, err := self.ReadChunk(my_buff)
 		if err != nil {
-			return len, err
+			return r, err
 		}
-		if complete {
-			self.expecting = 0
-			return len, nil
-		}
-		self.expecting -= len
-	}
 
+		return r, nil
+	}
 	read, err := self.m.readLine(buff[:])
 	if err != nil {
 		return read, err
@@ -325,14 +336,14 @@ func (self *Unchunker) Read(my_buff []byte) (int, error) {
 		return 0, ChunkErrorFrom("failed to parse chunk length")
 	}
 	if expectedlen == 0 {
-		return 0, nil
+		fmt.Println("end of file")
+		return 0, io.EOF
 	}
 	self.expecting = int(expectedlen)
-	len, complete, err := self.ReadChunk(my_buff)
+	len, complete, err := self.ReadChunk(my_buff[index:])
 	if err != nil {
 		return len, err
 	}
-	self.expecting -= len
 	if complete {
 		self.expecting = 0
 	}
@@ -395,8 +406,9 @@ func readHead(conection net.Conn) (*Message, error) {
 			break
 		}
 		var read_line = buff[:read_bytes]
+		mf := "malformed headers"
 		if read_line[len(read_line)-1] != '\r' {
-			return nil, HeaderErrorFrom("malformed request")
+			return nil, HeaderErrorFrom(mf)
 		}
 		read_line = buff[:read_bytes-1]
 		if len(read_line) == 0 {
@@ -407,46 +419,46 @@ func readHead(conection net.Conn) (*Message, error) {
 				message.message_type = RESPONSE
 				var found_buff, rem, found = bytes.Cut(read_line[:read_bytes], []byte(" "))
 				if !found {
-					return nil, HeaderErrorFrom("malformed request")
+					return nil, HeaderErrorFrom(mf)
 				}
 				if !regex.Match(found_buff) {
-					return nil, HeaderErrorFrom("malformed request")
+					return nil, HeaderErrorFrom(mf)
 				}
 				found_buff, rem, found = bytes.Cut(rem[:], []byte(" "))
 				if !found {
-					return nil, HeaderErrorFrom("malformed request")
+					return nil, HeaderErrorFrom(mf)
 				}
 				found_buff, rem, found = bytes.Cut(rem[:], []byte("\r"))
 				if len(found_buff) == 0 {
-					return nil, HeaderErrorFrom("malformed request")
+					return nil, HeaderErrorFrom(mf)
 				}
 			} else {
 				message.message_type = REQUEST
 				var found_buff, rem, found = bytes.Cut(read_line[:read_bytes], []byte(" "))
 				if !found {
-					return nil, HeaderErrorFrom("malformed request")
+					return nil, HeaderErrorFrom(mf)
 				}
 				message.http_method = parse(string(found_buff))
 				found_buff, rem, found = bytes.Cut(rem[:], []byte(" "))
 				if !found {
-					return nil, HeaderErrorFrom("malformed request")
+					return nil, HeaderErrorFrom(mf)
 				}
 				found_buff, rem, found = bytes.Cut(rem[:], []byte("\r"))
 				if len(found_buff) == 0 {
-					return nil, HeaderErrorFrom("malformed request")
+					return nil, HeaderErrorFrom(mf)
 				}
 				if !regex.Match(found_buff) {
-					return nil, HeaderErrorFrom("malformed request")
+					return nil, HeaderErrorFrom(mf)
 				}
 			}
 		} else {
 			var field_name, rem, found = bytes.Cut(read_line, []byte(":"))
 
 			if !found {
-				return nil, HeaderErrorFrom("malformed request")
+				return nil, HeaderErrorFrom(mf)
 			}
 			if field_name[len(field_name)-1] == ' ' {
-				return nil, HeaderErrorFrom("malformed request")
+				return nil, HeaderErrorFrom(mf)
 			}
 			rem = bytes.TrimSpace(rem)
 			field_values := regex_comma.Split(string(rem), -1)
@@ -464,14 +476,14 @@ func readHead(conection net.Conn) (*Message, error) {
 				return nil, HeaderErrorFrom("failed to parse content length")
 			}
 			message.length = int(content_len)
-			message.stream = HttpStream{&RealBuffer{conection}, false}
+			message.stream = HttpStream{&RealBuffer{conection}, false, int(content_len), 0}
 		} else {
 			if transfer_encoding == nil {
 				return nil, HeaderErrorFrom("content encoding not provided")
 			}
 
 			if transfer_encoding[len(transfer_encoding)-1] == "chunked" {
-				message.stream = HttpStream{&Unchunker{0, RealBuffer{conection}}, false}
+				message.stream = HttpStream{&Unchunker{0, RealBuffer{conection}}, false, 0, 0}
 			} else {
 				return nil, HeaderErrorFrom("content length not provided")
 			}
@@ -547,19 +559,24 @@ func main() {
 
 		fmt.Println("a new connection has been accepted")
 		var buff [1024]byte
-		request.stream.Read(buff[:])
-		fmt.Println(string(buff[:]))
+
+		for {
+			if request.stream.finished == true {
+				break
+			}
+			_, e := request.stream.Read(buff[:])
+
+			if e != nil {
+				if e != io.EOF {
+					panic(e)
+				}
+			}
+		}
+
 		fmt.Println("====**====")
 
 		var response ResponseBuilder
-
-		response.setHeader("hello", "world");
-
-		fmt.Println(response.toString())
-
 		request.stream.Write([]byte(response.toString()));
-		
-
 		request.stream.Close();
 
 	}
