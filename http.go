@@ -52,41 +52,7 @@ import (
 	"strings"
 )
 
-type mock struct {
-	current int
-	buffer  []uint8
-}
 
-func (self *mock) read(buff []uint8) int {
-	i := self.current
-	j := 0
-	for ; j < len(buff) && i < len(self.buffer); i++ {
-		buff[j] = self.buffer[i]
-		j++
-	}
-	self.current = i
-	return j
-}
-
-func (self *mock) readLine(buff []uint8) int {
-	var i = self.current
-	for {
-		if i-self.current >= len(buff) || i >= len(self.buffer) || self.buffer[i] == '\n' {
-			break
-		}
-		buff[i-self.current] = self.buffer[i]
-		i += 1
-	}
-	read_bytes := i - self.current
-	self.current = i + 1
-	return read_bytes
-}
-
-func initMockBuffer(str string) mock {
-	return mock{
-		current: 0, buffer: []byte(str),
-	}
-}
 
 type Conn interface {
 	Read(b []byte) (int, error);
@@ -130,12 +96,6 @@ func (self *RealBuffer) readLine(buff []byte) (int, error) {
 	}
 
 	return index, nil
-}
-
-func memset(buff []uint8, c uint8) {
-	for i := range buff {
-		buff[i] = c
-	}
 }
 
 type HTTPMethod = uint64
@@ -192,23 +152,31 @@ type Request struct {
 	//http_version string
 	uri         string
 	http_method HTTPMethod
-	method      HTTPMethod
 	headers     map[string][]string
 	stream      HttpStream
-	encoding    Encoding
 	length      int
 	status_code string
+}
+
+func (req *Request) Read(buff []byte) (int, error) {
+	return req.stream.Read(buff);
+}
+
+func (req *Request) Write(buff []byte) (int, error) {
+	return req.stream.Write(buff);
+}
+
+func (req *Request) Close() error {
+	return req.stream.Close();
+}
+
+func (req *Request) Finished () bool {
+	return req.stream.finished
 }
 
 type Unchunker struct {
 	expecting int
 	m         RealBuffer
-}
-
-type Stream struct {
-	total int
-	read  int
-	m     mock
 }
 
 type HttpStream struct {
@@ -266,22 +234,6 @@ const (
 	CHUNKED     Encoding = 0
 	CONTENT_LEN Encoding = 0
 )
-
-func (self *Stream) Read(buff []byte) int {
-	if self.read >= self.total {
-		return 0
-	}
-	var total_read = 0
-	for {
-		total_read += self.m.read(buff[total_read:])
-		if total_read >= len(buff) {
-			break
-		}
-	}
-
-	self.read += total_read
-	return total_read
-}
 
 func min(a int, b int) int {
 	if a > b {
@@ -436,7 +388,7 @@ func readHead(conection Conn) (*Request, error) {
 					return nil, HeaderErrorFrom(mf)
 				}
 				message.status_code = string(found_buff);
-				found_buff, rem, found = bytes.Cut(rem[:], []byte("\r"))
+				found_buff, _, _ = bytes.Cut(rem[:], []byte("\r"))
 				if len(found_buff) == 0 {
 					return nil, HeaderErrorFrom(mf)
 				}
@@ -451,7 +403,8 @@ func readHead(conection Conn) (*Request, error) {
 				if !found {
 					return nil, HeaderErrorFrom(mf)
 				}
-				found_buff, rem, found = bytes.Cut(rem[:], []byte("\r"))
+				message.uri = string(found_buff);
+				found_buff, _, _ = bytes.Cut(rem[:], []byte("\r"))
 				if len(found_buff) == 0 {
 					return nil, HeaderErrorFrom(mf)
 				}
@@ -503,6 +456,10 @@ func readHead(conection Conn) (*Request, error) {
 
 type HttpServer struct {
 	listener net.Listener
+}
+
+func CreateHTTPServer(listener net.Listener) HttpServer {
+	return HttpServer{listener}
 }
 
 func (self *HttpServer) Accept() (*Request, error) {
@@ -591,7 +548,6 @@ func (self *ResponseBuilder) toString() string {
 // }
 
 type HTTPClient struct {
-	url     string
 	conn    Conn
 	headers map[string]string
 }
