@@ -494,7 +494,7 @@ func (self *ResponseBuilder) setHeader(field string, value string) *ResponseBuil
 	return self
 }
 
-func (self *ResponseBuilder) toString() string {
+func (self *ResponseBuilder) String() string {
 	if self.status_code == "" {
 		self.status_code = "200"
 	}
